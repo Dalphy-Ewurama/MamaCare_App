@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:path/path.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+import 'dart:developer' as developer;
+import 'package:intl/intl.dart'; // Required for vaccine date formatting
 
 import '../models/antenatal_visit.dart';
 import '../models/pregnant_woman.dart';
@@ -22,26 +24,38 @@ class DatabaseService {
     return _database!;
   }
 
-  Future<Database> _initDatabase() async {
+Future<Database> _initDatabase() async {
+  String path;
+
+  // If running a unit test environment, use an isolated in-memory storage file
+  if (Platform.environment.containsKey('FLUTTER_TEST')) {
+    path = ':memory:';
+  } else {
     if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
       sqfliteFfiInit();
       databaseFactory = databaseFactoryFfi;
     }
-
     final dbPath = await getDatabasesPath();
-    final path = join(dbPath, 'mamacare.db');
-
-    return openDatabase(
-      path,
-      version: 2,
-      onCreate: (db, version) async {
-        await _createSchema(db);
-      },
-      onUpgrade: (db, oldVersion, newVersion) async {
-        await _createSchema(db);
-      },
-    );
+    path = join(dbPath, 'mamacare.db');
   }
+
+  return openDatabase(
+    path,
+    version: 3,
+    onCreate: (db, version) async {
+      await _createSchema(db);
+    },
+    onUpgrade: (db, oldVersion, newVersion) async {
+      if (oldVersion < 3) {
+        try {
+          await db.execute('ALTER TABLE pregnant_women ADD COLUMN scan_date TEXT;');
+          await db.execute('ALTER TABLE vaccinations ADD COLUMN notes TEXT;');
+        } catch (_) {}
+      }
+      await _createSchema(db);
+    },
+  );
+}
 
   Future<void> _createSchema(Database db) async {
     await db.execute('''
@@ -64,7 +78,20 @@ class DatabaseService {
         phone_number TEXT NOT NULL,
         gestational_age_weeks INTEGER NOT NULL,
         expected_delivery_date TEXT NOT NULL,
-        registered_at TEXT NOT NULL
+        registered_at TEXT NOT NULL,
+        scan_date TEXT
+      )
+    ''');
+
+    // FIXED: Syntax split cleaned up completely here
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS vaccinations (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        due_date TEXT NOT NULL,
+        completed INTEGER NOT NULL,
+        notes TEXT,
+        created_at TEXT NOT NULL
       )
     ''');
 
@@ -74,16 +101,6 @@ class DatabaseService {
         title TEXT NOT NULL,
         date TEXT NOT NULL,
         notes TEXT NOT NULL,
-        created_at TEXT NOT NULL
-      )
-    ''');
-
-    await db.execute('''
-      CREATE TABLE IF NOT EXISTS vaccinations (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        due_date TEXT NOT NULL,
-        completed INTEGER NOT NULL,
         created_at TEXT NOT NULL
       )
     ''');
@@ -182,9 +199,28 @@ class DatabaseService {
         'gestational_age_weeks': record.gestationalAgeWeeks,
         'expected_delivery_date': record.expectedDeliveryDate,
         'registered_at': record.registeredAt.toIso8601String(),
+        'scan_date': record.scanDate?.toIso8601String(),
       },
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+  }
+
+  Future<bool> updateScanDate(String email, DateTime scanDate) async {
+    try {
+      final db = await database;
+      int count = await db.update(
+        'pregnant_women',
+        {
+          'scan_date': scanDate.toIso8601String(),
+        },
+        where: 'email = ?',
+        whereArgs: [email],
+      );
+      return count > 0;
+    } catch (e) {
+      developer.log("DatabaseService update scanDate error", error: e);
+      return false;
+    }
   }
 
   Future<List<PregnantWoman>> loadPregnantWomanRecords() async {
@@ -200,9 +236,86 @@ class DatabaseService {
             gestationalAgeWeeks: int.parse(row['gestational_age_weeks'].toString()),
             expectedDeliveryDate: row['expected_delivery_date'].toString(),
             registeredAt: DateTime.parse(row['registered_at'].toString()),
+            scanDate: row['scan_date'] != null ? DateTime.parse(row['scan_date'].toString()) : null,
           ),
         )
         .toList();
+  }
+
+  // FIXED & ADDED: Dynamic Vaccination Generators
+  Future<void> generateDefaultVaccinationSchedule(String userEmail, DateTime conceptionBaseline) async {
+    final db = await database;
+
+    final existing = await db.query(
+      'vaccinations',
+      where: 'id LIKE ?',
+      whereArgs: ['$userEmail%'],
+    );
+    if (existing.isNotEmpty) return;
+
+    final List<Map<String, dynamic>> defaultVaccines = [
+      {'name': 'Tetanus Toxoid Booster (TT1)', 'week': 16},
+      {'name': 'Tetanus Toxoid Booster (TT2)', 'week': 20},
+      {'name': 'Malaria Prevention (IPTp-SP) - Dose 1', 'week': 16},
+      {'name': 'Malaria Prevention (IPTp-SP) - Dose 2', 'week': 20},
+      {'name': 'Malaria Prevention (IPTp-SP) - Dose 3', 'week': 24},
+    ];
+
+    for (var vaccine in defaultVaccines) {
+      int targetWeek = vaccine['week'];
+      DateTime estimatedDueDate = conceptionBaseline.add(Duration(days: targetWeek * 7));
+      String recordId = '${userEmail}_vax_w${targetWeek}_${DateTime.now().microsecondsSinceEpoch}';
+
+      await db.insert(
+        'vaccinations',
+        {
+          'id': recordId,
+          'name': vaccine['name'],
+          'due_date': DateFormat('yyyy-MM-dd').format(estimatedDueDate),
+          'completed': 0,
+          'notes': 'Estimated timeline reminder. Verify with your midwife.',
+          'created_at': DateTime.now().toIso8601String(),
+        },
+        conflictAlgorithm: ConflictAlgorithm.ignore,
+      );
+    }
+  }
+
+  Future<void> updateVaccinationDetails({
+    required String id,
+    required String confirmedDueDate,
+    required String clinicianNotes,
+    required bool isCompleted,
+  }) async {
+    final db = await database;
+    await db.update(
+      'vaccinations',
+      {
+        'due_date': confirmedDueDate,
+        'notes': clinicianNotes,
+        'completed': isCompleted ? 1 : 0,
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  Future<List<VaccinationRecord>> loadUserVaccinationRecords(String userEmail) async {
+    final db = await database;
+    final rows = await db.query(
+      'vaccinations',
+      where: 'id LIKE ?',
+      whereArgs: ['$userEmail%'],
+      orderBy: 'due_date ASC',
+    );
+    return rows.map((row) => VaccinationRecord(
+      id: row['id'].toString(),
+      name: row['name'].toString(),
+      dueDate: row['due_date'].toString(),
+      completed: (row['completed'] as int) == 1,
+      notes: row['notes']?.toString() ?? '',
+      createdAt: DateTime.parse(row['created_at'].toString()),
+    )).toList();
   }
 
   Future<void> saveAntenatalVisit(AntenatalVisit visit) async {
@@ -227,75 +340,41 @@ class DatabaseService {
             date: row['date'].toString(),
             notes: row['notes'].toString(),
             createdAt: DateTime.parse(row['created_at'].toString()),
-          ),
-        )
-        .toList();
-  }
-
-  Future<void> saveVaccinationRecord(VaccinationRecord record) async {
-    final db = await database;
-    await db.insert('vaccinations', {
-      'id': record.id,
-      'name': record.name,
-      'due_date': record.dueDate,
-      'completed': record.completed ? 1 : 0,
-      'created_at': record.createdAt.toIso8601String(),
-    }, conflictAlgorithm: ConflictAlgorithm.replace);
-  }
-
-  Future<List<VaccinationRecord>> loadVaccinationRecords() async {
-    final db = await database;
-    final rows = await db.query('vaccinations', orderBy: 'created_at DESC');
-    return rows
-        .map(
-          (row) => VaccinationRecord(
-            id: row['id'].toString(),
-            name: row['name'].toString(),
-            dueDate: row['due_date'].toString(),
-            completed: (row['completed'] as int) == 1,
-            createdAt: DateTime.parse(row['created_at'].toString()),
-          ),
-        )
-        .toList();
-  }
-
-  Future<void> toggleVaccinationCompletion(String id) async {
-    final db = await database;
-    final rows = await db.query('vaccinations', where: 'id = ?', whereArgs: [id], limit: 1);
-    if (rows.isEmpty) return;
-
-    final record = rows.first;
-    final completed = (record['completed'] as int) == 1;
-    await db.update(
-      'vaccinations',
-      {'completed': completed ? 0 : 1},
-      where: 'id = ?',
-      whereArgs: [id],
-    );
-  }
-
-  Future<void> clearAll() async {
-    final db = await database;
-    await db.delete('pregnant_women');
-    await db.delete('users');
-    await db.delete('antenatal_visits');
-    await db.delete('vaccinations');
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_sessionEmailKey);
-  }
-
-  Future<void> logout() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_sessionEmailKey);
-  }
-
-  Future<void> _setSessionEmail(String email) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_sessionEmailKey, email);
-  }
-
-  Future<String?> _getSessionEmail() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_sessionEmailKey);
-  }
+),
+)
+.toList();
 }
+Future saveVaccinationRecord(VaccinationRecord record) async {
+final db = await database;
+await db.insert('vaccinations', {
+'id': record.id,
+'name': record.name,
+'due_date': record.dueDate,
+'completed': record.completed ? 1 : 0,
+'notes': record.notes,
+'created_at': record.createdAt.toIso8601String(),
+}, conflictAlgorithm: ConflictAlgorithm.replace);
+}
+Future clearAll() async {
+final db = await database;
+await db.delete('pregnant_women');
+await db.delete('users');
+await db.delete('antenatal_visits');
+await db.delete('vaccinations');
+final prefs = await SharedPreferences.getInstance();
+await prefs.remove(_sessionEmailKey);
+}
+Future logout() async {
+final prefs = await SharedPreferences.getInstance();
+await prefs.remove(_sessionEmailKey);
+}
+Future _setSessionEmail(String email) async {
+final prefs = await SharedPreferences.getInstance();
+await prefs.setString(_sessionEmailKey, email);
+}
+Future<String?> _getSessionEmail() async {
+final prefs = await SharedPreferences.getInstance();
+return prefs.getString(_sessionEmailKey);
+}
+}
+

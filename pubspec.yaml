@@ -21,9 +21,11 @@ dependencies:
   table_calendar: ^3.1.2
   intl: ^0.20.2
 
-  google_maps_flutter: ^2.12.3
+  # Open-Source Mapping Stack (Replaces Google Maps)
+  flutter_map: ^7.0.2
+  latlong2: ^0.9.0
   geolocator: ^14.0.2
-  permission_handler: ^12.0.1
+  http: ^1.2.2 
 
   flutter_local_notifications: ^19.4.0
 
@@ -43,10 +45,9 @@ flutter_launcher_icons:
   android: "launcher_icon"
   ios: true
   image_path: "assets/icons/app_icon.png"
-  remove_alpha_ios: true  # Add this line to strip transparency automatically
+  remove_alpha_ios: true  
   adaptive_icon_background: "#FFFFFF"
   adaptive_icon_foreground: "assets/icons/app_icon.png"
-
 
 flutter:
   uses-material-design: true

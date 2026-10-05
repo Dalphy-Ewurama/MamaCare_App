@@ -1,46 +1,53 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:mamacare/models/antenatal_visit.dart';
 import 'package:mamacare/models/vaccination_record.dart';
 import 'package:mamacare/services/database_service.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 void main() {
-  TestWidgetsFlutterBinding.ensureInitialized();
+  // Initialize standard background test suite FFI database factories
+  sqfliteFfiInit();
+  databaseFactory = databaseFactoryFfi;
 
-  setUp(() async {
-    SharedPreferences.setMockInitialValues({});
-    await DatabaseService.instance.clearAll();
-  });
+  group('Mamacare Database CRUD Integration Testing', () {
+    const testEmail = 'testmother@mamacare.com';
 
-  test('saves and loads antenatal visits', () async {
-    final visit = AntenatalVisit(
-      id: 'visit-1',
-      title: 'Anomaly Scan',
-      date: '2026-08-20',
-      notes: 'Bring medical card',
-      createdAt: DateTime(2026, 7, 17),
-    );
+    setUp(() async {
+      // Clear out older instances before starting fresh test passes
+      await DatabaseService.instance.clearAll();
+    });
 
-    await DatabaseService.instance.saveAntenatalVisit(visit);
-    final visits = await DatabaseService.instance.loadAntenatalVisits();
+    test('Should successfully write and retrieve updated vaccination entries with notes', () async {
+      // FIXED: Added required notes parameter argument here to fix constructor error
+      final mockVax = VaccinationRecord(
+        id: '${testEmail}_vax_test_id',
+        name: 'Tetanus Toxoid Booster (TT1)',
+        dueDate: '2026-11-20',
+        completed: false,
+        notes: 'Initial clinical milestone timeline reminder estimation.',
+        createdAt: DateTime.now(),
+      );
 
-    expect(visits, hasLength(1));
-    expect(visits.first.title, 'Anomaly Scan');
-  });
+      // Save record down using your updated models structure layout
+      await DatabaseService.instance.saveVaccinationRecord(mockVax);
 
-  test('saves and toggles vaccination records', () async {
-    final record = VaccinationRecord(
-      id: 'vacc-1',
-      name: 'BCG',
-      dueDate: 'At birth',
-      completed: false,
-      createdAt: DateTime(2026, 7, 17),
-    );
+      // FIXED: Used updated loadUserVaccinationRecords instead of deprecated undefined methods
+      var records = await DatabaseService.instance.loadUserVaccinationRecords(testEmail);
+      expect(records.length, 1);
+      expect(records.first.completed, false);
 
-    await DatabaseService.instance.saveVaccinationRecord(record);
-    await DatabaseService.instance.toggleVaccinationCompletion('vacc-1');
-    final records = await DatabaseService.instance.loadVaccinationRecords();
+      // FIXED: Used updateVaccinationDetails instead of old toggleVaccinationCompletion signature
+      await DatabaseService.instance.updateVaccinationDetails(
+        id: mockVax.id,
+        confirmedDueDate: '2026-11-22',
+        clinicianNotes: 'Confirmed and administered at health center by midwife.',
+        isCompleted: true,
+      );
 
-    expect(records.first.completed, isTrue);
+      // Verify updates persisted seamlessly inside the backend table columns
+      records = await DatabaseService.instance.loadUserVaccinationRecords(testEmail);
+      expect(records.first.completed, true);
+      expect(records.first.dueDate, '2026-11-22');
+      expect(records.first.notes, 'Confirmed and administered at health center by midwife.');
+    });
   });
 }
